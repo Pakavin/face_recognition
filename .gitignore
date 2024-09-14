@@ -1,5 +1,7 @@
 db/
 
 deepface-env/
+Celebrity Faces Dataset/
+db/
 
 *.env
