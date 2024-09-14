@@ -3,24 +3,65 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import threading
+import sqlite3
+import glob
 import time
 import uuid
 import cv2
 import os
 
 class FaceAuthentication:
-  def __init__(self, source=0, db_path='db'):
+  def __init__(self, source=0, db="face_database.db", root="db"):
     self.cap = cv2.VideoCapture(source)
-    if not os.path.exists(db_path):
-      os.makedirs(db_path)
-    self.db_path = db_path
 
-    self.image = None
-    self.label = None
+    if not os.path.exists(root):
+      os.makedirs(root)
+    self.root = root
+    self.db = db
+
+    connection = sqlite3.connect(db)
+    cursor = connection.cursor()
+    cursor.execute("""
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_name TEXT NOT NULL,
+        dir TEXT 
+      )
+    """)
+    connection.commit()
+    connection.close()
+
+    self.cropped_frame = None
+    self.identity = None
+
+
+  def detect(self, frame=None, threshold=0):
+    cropped_frame = None
+    boundary = None
+    try:
+      face = DeepFace.extract_faces(img_path=frame)
+
+      if face[0]['confidence'] >= threshold:
+        face_data = face[0]['facial_area']
+        x, y, w, h, leye, reye = face_data.values()
+
+        cropped_frame = frame[y:y+h, x:x+w]
+        
+        COLOR = (0, 255, 0)
+        THICKNESS = 2
+        START_POINT = (x, y)
+        END_POINT = (x + w, y + h)
+
+        boundary = (frame, START_POINT, END_POINT, COLOR, THICKNESS)
+    except:
+      pass
+
+    return cropped_frame, boundary
+
 
   def register(self, timeout=3):
-    name = input("Enter your name: ")
-    start_time = time.time()
+    full_name = input("Enter your full name: ")
+    start_time = time.time() 
 
     window_name = "Face registration"
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
@@ -30,35 +71,70 @@ class FaceAuthentication:
       elapsed_time = time.time() - start_time
       ret, frame = self.cap.read()
 
-      face = DeepFace.extract_faces(img_path=frame, enforce_detection=False)
-      face_data = face[0]['facial_area']
-      x, y, w, h, leye, reye = face_data.values()
+      self.cropped_frame, boundary = self.detect(frame)
 
-      COLOR = (0, 0, 255)
-      THICKNESS = 2
-      START_POINT = (x, y)
-      END_POINT = (x + w, y + h)
-      
       print(elapsed_time, timeout)
-      if elapsed_time >= timeout and face[0]['confidence'] > 0:
-        if face[0]['confidence'] < 0.5:
+      if elapsed_time >= timeout:
+        if self.cropped_frame is None and self.cropped_frame.size != 0:
           print("Face not detected")
-          break
         else:
-          id = uuid.uuid4()
-          path = os.path.join(self.db_path, f"{str(id)}_{name}.jpg")
-          cv2.imwrite(path, frame[y:y+h, x:x+w])
+          connection = sqlite3.connect(self.db)
+          cursor = connection.cursor()
+          cursor.execute('SELECT dir FROM users WHERE full_name = ? LIMIT 1', (full_name,))
+          dir = cursor.fetchone()
+          if not dir:
+            dir = (os.path.join(self.root, str(uuid.uuid4())),)
 
+            cursor.execute('INSERT INTO users (full_name, dir) VALUES (?, ?)', (full_name, dir[0]))
+            connection.commit()
+
+          if not os.path.exists(dir[0]):
+            os.makedirs(dir[0])
+
+          filename = str(uuid.uuid4()) + '.jpg'
+          cv2.imwrite(os.path.join(dir[0], filename), self.cropped_frame)
           print("Successfully registered")
-          break
 
-      cv2.rectangle(frame, START_POINT, END_POINT, COLOR, THICKNESS)
+          connection.close()
+        break
+      
+      try:
+        cv2.rectangle(*boundary)
+      except: pass
       cv2.imshow(window_name, frame)
-
       if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
     cv2.destroyAllWindows()
+
+
+  def retrieve(self, folder_path):
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+          img_path = os.path.join(root, file)
+          img = cv2.imread(img_path)
+       
+          self.cropped_frame, boundary = self.detect(img, 0.9)
+         
+          if self.cropped_frame is not None and self.cropped_frame.size != 0:
+
+            full_name = os.path.normpath(root).split(os.sep)[-1]
+
+            connection = sqlite3.connect(self.db)
+            cursor = connection.cursor()
+            cursor.execute('SELECT dir FROM users WHERE full_name = ? LIMIT 1', (full_name,))
+            dir = cursor.fetchone()
+            if not dir:
+              dir = (os.path.join(self.root, str(uuid.uuid4())),)
+              
+              cursor.execute('INSERT INTO users (full_name, dir) VALUES (?, ?)', (full_name, dir[0]))
+              connection.commit()
+
+            if not os.path.exists(dir[0]):
+              os.makedirs(dir[0])
+
+            filename = str(uuid.uuid4()) + '.jpg'
+            cv2.imwrite(os.path.join(dir[0], filename), self.cropped_frame)
 
 
   def run(self):
@@ -72,46 +148,34 @@ class FaceAuthentication:
     while True:
       ret, frame = self.cap.read()
 
-      face = DeepFace.extract_faces(img_path=frame, enforce_detection=False)
-      face_data = face[0]['facial_area']
-      x, y, w, h, leye, reye = face_data.values()
+      self.cropped_frame, boundary = self.detect(frame)
+      if self.identity is not None:
+        pass
 
-      COLOR = (0, 0, 255)
-      THICKNESS = 2
-      START_POINT = (x, y)
-      END_POINT = (x + w, y + h)
-      FONT = cv2.FONT_HERSHEY_SIMPLEX
-      
-      if face[0]['confidence'] >= 0.5:
-        self.image = frame[y:y+h, x:x+w]
-        cv2.rectangle(frame, START_POINT, END_POINT, COLOR, THICKNESS)
-
-        if self.label is not None:
-          cv2.putText(frame, self.label, START_POINT, FONT, 1, COLOR, THICKNESS)
-      else:
-        self.image = None
-
+      try:
+        cv2.rectangle(*boundary)
+      except: pass
       cv2.imshow(window_name, frame)
-
       if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+    try:
+      cv2.rectangle(*boundary)
+    except: pass
     cv2.destroyAllWindows()
 
 
   def verify(self):
     while True:
-      if self.image is not None:
-        dfs = DeepFace.find(img_path=self.image, db_path=self.db_path, enforce_detection=False, silent=True)
-        if not dfs[0].empty:   
-          filename = Path(dfs[0].iloc[0].identity).stem
-          self.label = filename.split('_')[1]
-      time.sleep(1)
-
+      self.identity = None
+      try:
+        dfs = DeepFace.find(self.cropped_frame, self.root, enforce_detection=False)
+        print(dfs)
+      except:
+        pass    
 
 if __name__ == '__main__':
   auth = FaceAuthentication()
-  auth.register(5)
+  #auth.register(5)
+  #auth.retrieve("C:\Workspace\deepface\Celebrity Faces Dataset")
   auth.run()
-  #dfs = DeepFace.verify("C:/Workspace/deepface/temp/ok.jpg", "C:/Workspace/deepface/db/66cc55a7-77c4-43b1-a76d-3ee1eac2d246_b.jpg", enforce_detection=False)
-  #print(dfs)
