@@ -2,6 +2,7 @@ db/
 
 deepface-env/
 Celebrity Faces Dataset/
+faces/
 db/
 
 *.env
